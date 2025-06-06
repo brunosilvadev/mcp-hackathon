@@ -2,8 +2,23 @@ import gradio as gr
 import difflib
 from fastapi import FastAPI, Request
 from rules import RULES
+from transformers import pipeline
+import numpy as np
 
-# Your existing logic
+# Initialize TTS pipeline (pick a lightweight model for Spaces)
+tts = pipeline("text-to-speech", model="facebook/mms-tts-eng", device="cpu")
+
+def get_audio_from_text(text):
+    result = tts(text)
+    audio = result["audio"]
+    sr = result["sampling_rate"]
+    # Ensure it's a numpy float32 array and values are in [-1, 1]
+    audio = np.array(audio).astype(np.float32)
+    audio = np.clip(audio, -1.0, 1.0)  # Just in case
+    return (sr, audio)
+
+
+# --- Your exact explain_rule function below ---
 def explain_rule(description, sport):
     sport = sport.lower()
     input_text = description.lower()
@@ -45,33 +60,38 @@ def explain_rule(description, sport):
             "Try rephrasing, or check the official rules [here](https://olympics.com/en/sports)."
         )
 
-# FastAPI app
+# -- MCP API expects only text, UI gives text + audio --
+
 app = FastAPI()
 
-# MCP endpoint
 @app.post("/mcp/v1/execute")
 async def mcp_execute(request: Request):
     data = await request.json()
-    # Support both "description" and "text" as possible input keys
     description = data.get("input", {}).get("description") or data.get("input", {}).get("text")
-    # Support both in input and parameters
     sport = data.get("input", {}).get("sport") or data.get("parameters", {}).get("sport")
     if not description or not sport:
         return {"error": "Both 'description' and 'sport' are required in input."}
     explanation = explain_rule(description, sport)
     return {"output": explanation}
 
-# Gradio UI
+# For the UI, make a wrapper to provide both text and audio
+def explain_rule_with_audio(description, sport):
+    explanation = explain_rule(description, sport)
+    audio = get_audio_from_text(explanation)
+    return explanation, audio
+
 demo = gr.Interface(
-    fn=explain_rule,
+    fn=explain_rule_with_audio,
     inputs=[
         gr.Textbox(label="Describe what happened", lines=2, placeholder="e.g., The ball touched the edge of the table"),
         gr.Dropdown(list(RULES.keys()), label="Sport")
     ],
-    outputs="markdown",
+    outputs=[
+        gr.Textbox(label="Explanation"),
+        gr.Audio(label="Voice Explanation")
+    ],
     title="What Just Happened??",
-    description="Explain confusing rules and scenarios in lesser-known Olympic sports."
+    description="Explain confusing rules and scenarios in lesser-known Olympic sports, now with voice!"
 )
 
-# Mount Gradio UI at the root ("/")
 app = gr.mount_gradio_app(app, demo, path="/")
